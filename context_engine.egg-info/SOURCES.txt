@@ -4,6 +4,7 @@ context_engine/__init__.py
 context_engine.egg-info/PKG-INFO
 context_engine.egg-info/SOURCES.txt
 context_engine.egg-info/dependency_links.txt
+context_engine.egg-info/requires.txt
 context_engine.egg-info/top_level.txt
 context_engine/focus/boundaries.py
 context_engine/focus/clustering.py
@@ -14,6 +15,7 @@ context_engine/observer/macos.py
 context_engine/observer/windows.py
 context_engine/restore/launcher.py
 context_engine/semantics/labeler.py
+context_engine/state/event.py
 context_engine/state/session_store.py
 context_engine/state/snapshot.py
 context_engine/utils/logging.py
