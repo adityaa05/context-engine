@@ -21,7 +21,7 @@ def main():
             print(
                 f"{event.timestamp.strftime('%H:%M:%S')} | "
                 f"{event.app:20} | "
-                f"{event.title[:40]:40} | "
+                f"{str(event.title or '')[:40]:40} | "
                 f"idle={event.idle_seconds:.1f}"
             )
             time.sleep(1)

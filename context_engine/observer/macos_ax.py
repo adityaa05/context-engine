@@ -1,23 +1,13 @@
 from AppKit import NSWorkspace
+from ApplicationServices import (
+    AXUIElementCreateApplication,
+    AXUIElementCopyAttributeValue,
+    kAXFocusedWindowAttribute,
+    kAXTitleAttribute,
+    AXIsProcessTrustedWithOptions,
+    kAXTrustedCheckOptionPrompt,
+)
 
-# Import ALL Accessibility APIs from ApplicationServices
-try:
-    from ApplicationServices import (
-        AXUIElementCreateApplication,
-        AXUIElementCopyAttributeValue,
-        kAXFocusedWindowAttribute,
-        kAXTitleAttribute,
-    )
-except ImportError:
-    # Ultimate fallback (very unlikely to work with modern PyObjC)
-    from Quartz import (
-        AXUIElementCreateApplication,
-        AXUIElementCopyAttributeValue,
-        kAXFocusedWindowAttribute,
-        kAXTitleAttribute,
-    )
-
-# Keep ONLY Core Graphics APIs in Quartz
 from Quartz import (
     CGEventSourceSecondsSinceLastEventType,
     kCGEventSourceStateHIDSystemState,
@@ -28,6 +18,17 @@ from context_engine.observer.base import BaseObserver
 
 
 class MacOSAXObserver(BaseObserver):
+
+    def __init__(self):
+        # THIS triggers the macOS permission popup
+        options = {kAXTrustedCheckOptionPrompt: True}
+        trusted = AXIsProcessTrustedWithOptions(options)
+
+        if not trusted:
+            print("\n macOS is asking for Accessibility permission.")
+            print("Approve it, then RE-RUN the program.\n")
+            raise SystemExit(1)
+
     def get_idle_seconds(self) -> float:
         return CGEventSourceSecondsSinceLastEventType(
             kCGEventSourceStateHIDSystemState,
@@ -42,12 +43,10 @@ class MacOSAXObserver(BaseObserver):
         app_ref = AXUIElementCreateApplication(pid)
 
         try:
-            window_ref, _ = AXUIElementCopyAttributeValue(
+            window = AXUIElementCopyAttributeValue(
                 app_ref, kAXFocusedWindowAttribute, None
-            )
-            title, _ = AXUIElementCopyAttributeValue(
-                window_ref, kAXTitleAttribute, None
-            )
-            return app_name, str(title) if title else ""
+            )[0]
+            title = AXUIElementCopyAttributeValue(window, kAXTitleAttribute, None)[0]
+            return app_name, title if title else ""
         except Exception:
             return app_name, ""
