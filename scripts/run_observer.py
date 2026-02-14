@@ -1,12 +1,12 @@
 import time
 import platform
 
-from context_engine.observer.macos import MacOSObserver
+from context_engine.observer.macos_ax import MacOSAXObserver
 
 
 def get_observer():
     if platform.system() == "Darwin":
-        return MacOSObserver()
+        return MacOSAXObserver()
     raise NotImplementedError("OS not supported yet")
 
 

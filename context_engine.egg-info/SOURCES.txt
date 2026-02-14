@@ -12,6 +12,7 @@ context_engine/focus/slice.py
 context_engine/observer/base.py
 context_engine/observer/idle.py
 context_engine/observer/macos.py
+context_engine/observer/macos_ax.py
 context_engine/observer/windows.py
 context_engine/restore/launcher.py
 context_engine/semantics/labeler.py

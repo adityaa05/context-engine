@@ -1,1 +1,2 @@
+pyobjc-framework-applicationservices>=12.1
 pyobjc-framework-quartz>=12.1
