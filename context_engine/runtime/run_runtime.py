@@ -2,7 +2,6 @@ import subprocess
 import json
 from session_builder import SessionBuilder, Event
 
-
 LOG_CMD = [
     "log",
     "stream",
@@ -15,29 +14,26 @@ LOG_CMD = [
 ]
 
 
-def stream_events(proc):
+def iter_log_objects(proc):
     buffer = ""
-    depth = 0
+    for line in proc.stdout:
+        line = line.strip()
 
-    while True:
-        ch = proc.stdout.read(1)
-        if not ch:
-            break
+        if not line:
+            continue
 
-        if ch == "{":
-            depth += 1
+        # remove array brackets safely
+        if line in ("[", "]", ","):
+            continue
 
-        if depth > 0:
-            buffer += ch
+        # remove trailing comma
+        if line.endswith(","):
+            line = line[:-1]
 
-        if ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    yield json.loads(buffer)
-                except Exception:
-                    pass
-                buffer = ""
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
 
 def main():
@@ -53,15 +49,17 @@ def main():
 
     print("Listening to ContextAgent...\n")
 
-    for entry in stream_events(proc):
+    for entry in iter_log_objects(proc):
         msg = entry.get("eventMessage")
-
         if not msg or "|" not in msg:
             continue
 
-        ts, app, title, idle = msg.split("|", 3)
-        event = Event(float(ts), app, title, float(idle))
-        builder.process(event)
+        try:
+            ts, app, title, idle = msg.rsplit("|", 3)
+            event = Event(float(ts), app, title, float(idle))
+            builder.process(event)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
