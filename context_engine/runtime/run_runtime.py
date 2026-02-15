@@ -1,6 +1,8 @@
 import subprocess
 import json
+
 from loop_detector import LoopDetector, Event
+from cognitive_state import CognitiveState
 
 LOG_CMD = [
     "log",
@@ -12,16 +14,20 @@ LOG_CMD = [
 ]
 
 
-def extract_json(line: str):
+def extract_json(line):
     start = line.find("{")
     end = line.rfind("}")
     if start == -1 or end == -1:
         return None
-    return line[start : end + 1]
+    try:
+        return json.loads(line[start : end + 1])
+    except:
+        return None
 
 
 def main():
-    builder = LoopDetector()
+    loops = LoopDetector()
+    brain = CognitiveState()
 
     proc = subprocess.Popen(
         LOG_CMD,
@@ -33,28 +39,20 @@ def main():
 
     print("Context runtime connected to agent\n")
 
-    for raw in proc.stdout:
-        raw = raw.strip()
-
-        json_part = extract_json(raw)
-        if not json_part:
+    for line in proc.stdout:
+        data = extract_json(line)
+        if not data:
             continue
 
-        try:
-            data = json.loads(json_part)
+        event = Event(
+            ts=float(data["ts"]),
+            app=data["app"],
+            title=data["title"],
+            idle=float(data["idle"]),
+        )
 
-            event = Event(
-                ts=float(data["ts"]),
-                app=data["app"],
-                title=data["title"],
-                idle=float(data["idle"]),
-            )
-
-            builder.process(event)
-
-        except Exception:
-            # silent — logs contain garbage sometimes
-            pass
+        loops.process(event)
+        brain.process(event)
 
 
 if __name__ == "__main__":
