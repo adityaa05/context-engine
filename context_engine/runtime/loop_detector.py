@@ -3,6 +3,26 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Deque, Optional, Tuple
 
+import re
+
+NOISE_PATTERNS = [
+    r" — \d+×\d+",
+    r" - YouTube",
+    r"\(\d+\)",
+    r"YouTube Video Player",
+    r"YouTube Home",
+]
+
+
+def normalize(app: str, title: str) -> str:
+    text = f"{app} {title}".lower()
+
+    for p in NOISE_PATTERNS:
+        text = re.sub(p, "", text)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 
 # -------- EVENT --------
 
@@ -89,7 +109,7 @@ class LoopDetector:
 
     def detect_loop(self, e: Event) -> None:
 
-        text = f"{e.app} {e.title}".strip()
+        text = normalize(e.app, e.title)
 
         if not text:
             return
@@ -117,8 +137,8 @@ class LoopDetector:
         # recurrence detected
         if best_score > SIM_THRESHOLD:
             self.anchor_hits += 1
-        else:
-            self.anchor_hits = max(0, self.anchor_hits - 1)
+        elif len(self.memory) > 5:
+            self.anchor_hits *= 0.85
 
         # form attractor
         if (
