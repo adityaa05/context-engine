@@ -1,43 +1,24 @@
 import subprocess
 import json
-from session_builder import SessionBuilder, Event
+import re
+from loop_detector import LoopDetector, Event
+
 
 LOG_CMD = [
     "log",
     "stream",
     "--style",
-    "json",
-    "--level",
-    "debug",
+    "compact",
     "--predicate",
     'subsystem == "com.context.agent"',
 ]
 
-
-def iter_log_objects(proc):
-    buffer = ""
-    for line in proc.stdout:
-        line = line.strip()
-
-        if not line:
-            continue
-
-        # remove array brackets safely
-        if line in ("[", "]", ","):
-            continue
-
-        # remove trailing comma
-        if line.endswith(","):
-            line = line[:-1]
-
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            continue
+# finds JSON inside macOS log line
+json_pattern = re.compile(r"({.*})")
 
 
 def main():
-    builder = SessionBuilder()
+    builder = LoopDetector()
 
     proc = subprocess.Popen(
         LOG_CMD,
@@ -47,19 +28,27 @@ def main():
         bufsize=1,
     )
 
-    print("Listening to ContextAgent...\n")
+    print("Context runtime connected to agent\n")
 
-    for entry in iter_log_objects(proc):
-        msg = entry.get("eventMessage")
-        if not msg or "|" not in msg:
+    for line in proc.stdout:
+        match = json_pattern.search(line)
+        if not match:
             continue
 
         try:
-            ts, app, title, idle = msg.rsplit("|", 3)
-            event = Event(float(ts), app, title, float(idle))
+            data = json.loads(match.group(1))
+
+            event = Event(
+                ts=float(data["ts"]),
+                app=data["app"],
+                title=data["title"],
+                idle=float(data["idle"]),
+            )
+
             builder.process(event)
+
         except Exception:
-            pass
+            print("parse error:", line)
 
 
 if __name__ == "__main__":
