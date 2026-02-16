@@ -1,6 +1,13 @@
 from typing import Optional
 
-REENTRY_WINDOW = 35
+# observation window (hard cap)
+MAX_OBSERVE = 15.0
+
+# decision thresholds
+FAST_SWITCH_TIME = 3.0
+ABANDON_IDLE = 12.0
+FAST_RESET = 2.0
+RECONSTRUCT_MIN = 3.0
 
 
 class ReentryClassifier:
@@ -8,56 +15,99 @@ class ReentryClassifier:
     def __init__(self):
         self.active = False
         self.start_ts = 0.0
-        self.prev_anchor = None
+        self.prev_anchor: Optional[str] = None
 
-        self.first_hit_ts: Optional[float] = None
-        self.visited = set()
-        self.resets = 0
-        self.events = 0
+        # observation metrics
+        self.first_reset_ts: Optional[float] = None
+        self.first_switch_ts: Optional[float] = None
+
+        self.reset_count = 0
+        self.last_semantic: Optional[str] = None
+        self.max_idle = 0.0
+
+    # ---------------- START ----------------
 
     def start(self, ts: float, previous_anchor: Optional[str]):
         self.active = True
         self.start_ts = ts
         self.prev_anchor = previous_anchor
-        self.first_hit_ts = None
-        self.visited.clear()
-        self.resets = 0
-        self.events = 0
+
+        self.first_reset_ts = None
+        self.first_switch_ts = None
+        self.reset_count = 0
+        self.last_semantic = None
+        self.max_idle = 0.0
+
         print("\n[REENTRY START]")
 
-    def observe(self, ts: float, semantic: str, similar: bool, reset: bool):
+    # ---------------- OBSERVE ----------------
+
+    def observe(
+        self, ts: float, semantic: str, similar: bool, reset: bool, idle: float
+    ):
         if not self.active:
             return None
 
-        self.events += 1
-        self.visited.add(semantic)
+        elapsed = ts - self.start_ts
+        self.max_idle = max(self.max_idle, idle)
 
+        # detect app/task switch
+        if self.last_semantic and semantic != self.last_semantic:
+            if self.first_switch_ts is None:
+                self.first_switch_ts = elapsed
+
+        self.last_semantic = semantic
+
+        # detect action
         if reset:
-            self.resets += 1
+            self.reset_count += 1
+            if self.first_reset_ts is None:
+                self.first_reset_ts = elapsed
 
-        if similar and self.first_hit_ts is None:
-            self.first_hit_ts = ts
+        # ---------- EARLY EXIT RULES ----------
 
-        if ts - self.start_ts >= REENTRY_WINDOW:
-            return self.finish(ts)
+        # immediate replacement
+        if self.first_switch_ts is not None and self.first_switch_ts < FAST_SWITCH_TIME:
+            return self.finish("REPLACED")
+
+        # abandonment
+        if self.max_idle > ABANDON_IDLE:
+            return self.finish("ABANDONED")
+
+        # decisive continuation
+        if (
+            self.first_reset_ts is not None
+            and self.first_reset_ts < FAST_RESET
+            and self.reset_count >= 3
+        ):
+            return self.finish("CONTINUED")
+
+        # reconstruction pattern
+        if (
+            self.first_reset_ts is not None
+            and RECONSTRUCT_MIN <= self.first_reset_ts <= 10
+            and self.reset_count >= 2
+        ):
+            return self.finish("RECONSTRUCTED")
+
+        # hard timeout
+        if elapsed >= MAX_OBSERVE:
+            return self.finish(self.default_verdict())
 
         return None
 
-    def finish(self, ts: float):
+    # ---------------- DEFAULT DECISION ----------------
+
+    def default_verdict(self):
+        if self.reset_count == 0:
+            return "ABANDONED"
+        if self.first_reset_ts and self.first_reset_ts < 4:
+            return "CONTINUED"
+        return "REPLACED"
+
+    # ---------------- FINISH ----------------
+
+    def finish(self, verdict: str):
         self.active = False
-
-        latency = (self.first_hit_ts - self.start_ts) if self.first_hit_ts else 999
-
-        entropy = len(self.visited)
-
-        if latency < 2 and entropy <= 2:
-            verdict = "CONTINUED"
-        elif latency < 10:
-            verdict = "RESUMED"
-        elif latency < 35 and self.first_hit_ts:
-            verdict = "RECONSTRUCTED"
-        else:
-            verdict = "REPLACED"
-
         print(f"[REENTRY RESULT] {verdict}\n")
         return verdict
