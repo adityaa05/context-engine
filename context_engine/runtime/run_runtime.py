@@ -3,7 +3,7 @@ import json
 import re
 from typing import Optional
 
-from loop_detector import LoopDetector, Event
+from .loop_detector import LoopDetector, Event
 
 
 # -------- LOG SOURCE --------

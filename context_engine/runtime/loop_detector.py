@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from typing import Deque, Optional, Tuple, List
 import re
 
+from .reentry_classifier import ReentryClassifier
+
+
 # ---------------- EVENT ----------------
 
 
@@ -52,9 +55,53 @@ class LoopDetector:
         self.micro_buffer: Deque[str] = deque(maxlen=STATE_MEMORY)
         self.phase: Optional[str] = None
 
+        # ---------------- NEW: REENTRY SYSTEM ----------------
+        self.suspended = False
+        self.last_anchor_before_sleep: Optional[str] = None
+        self.reentry = ReentryClassifier()
+
     # ---------------- PROCESS ----------------
 
     def process(self, e: Event) -> None:
+
+        # ---------- SUSPEND DETECTION ----------
+
+        # entering suspension
+        if not self.suspended and e.idle > 25:
+            self.suspended = True
+            self.last_anchor_before_sleep = self.anchor_text
+            print("\n[SUSPEND]")
+
+        # waking up
+        if self.suspended and e.idle < 0.5:
+            self.suspended = False
+            self.reentry.start(e.ts, self.last_anchor_before_sleep)
+
+        # ---------- REENTRY GATE ----------
+
+        semantic_now = f"{e.app} {e.title}".lower()
+
+        similar = (
+            self.last_anchor_before_sleep is not None
+            and self.last_anchor_before_sleep in semantic_now
+        )
+
+        reset = False
+        if self.prev_idle is not None:
+            reset = (self.prev_idle - e.idle) > 1.5 and e.idle < 0.3
+
+        verdict = self.reentry.observe(e.ts, semantic_now, similar, reset)
+
+        if verdict:
+            # cognition stabilized
+            self.anchor_hits = 0
+
+        # while brain reconstructing → ignore loops
+        if self.reentry.active:
+            self.prev_idle = e.idle
+            return
+
+        # ---------- NORMAL PIPELINE ----------
         self.update_state(e)
         self.detect_loop(e)
 
