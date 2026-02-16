@@ -1,7 +1,6 @@
 from collections import deque, Counter
 from dataclasses import dataclass
 from typing import Deque, Optional, Tuple, List
-import math
 import re
 
 # ---------------- EVENT ----------------
@@ -19,8 +18,7 @@ class Event:
 
 WINDOW = 60
 ANCHOR_CONFIRM = 4
-STATE_MEMORY = 8
-
+STATE_MEMORY = 12
 
 # ---------------- TOKENIZATION ----------------
 
@@ -49,10 +47,10 @@ class LoopDetector:
         self.anchor_hits = 0
         self.anchor_text: Optional[str] = None
 
-        # cognitive state
+        # cognitive phase tracking
         self.prev_idle: Optional[float] = None
-        self.idle_resets: Deque[bool] = deque(maxlen=STATE_MEMORY)
-        self.state: Optional[str] = None
+        self.micro_buffer: Deque[str] = deque(maxlen=STATE_MEMORY)
+        self.phase: Optional[str] = None
 
     # ---------------- PROCESS ----------------
 
@@ -60,7 +58,7 @@ class LoopDetector:
         self.update_state(e)
         self.detect_loop(e)
 
-    # ---------------- STATE MODEL ----------------
+    # ---------------- STATE MODEL (TEMPORAL) ----------------
 
     def update_state(self, e: Event) -> None:
 
@@ -72,25 +70,35 @@ class LoopDetector:
         self.prev_idle = e.idle
 
         reset = delta > 1.5 and e.idle < 0.3
-        self.idle_resets.append(reset)
 
-        if len(self.idle_resets) < 5:
+        if e.idle > 20:
+            micro = "DETACHED"
+        elif reset:
+            micro = "ACTIVE"
+        else:
+            micro = "PASSIVE"
+
+        self.micro_buffer.append(micro)
+
+        if len(self.micro_buffer) < 8:
             return
 
-        ratio = sum(self.idle_resets) / len(self.idle_resets)
+        active = self.micro_buffer.count("ACTIVE")
+        passive = self.micro_buffer.count("PASSIVE")
+        detached = self.micro_buffer.count("DETACHED")
 
-        if e.idle > 15:
-            new_state = "AWAY"
-        elif ratio > 0.45:
-            new_state = "EXECUTING"
-        elif ratio > 0.15:
-            new_state = "SCANNING"
+        if detached >= 6:
+            new_phase = "DETACHED"
+        elif active >= 6:
+            new_phase = "EXPLORING"
+        elif passive >= 6:
+            new_phase = "STABLE"
         else:
-            new_state = "ABSORBED"
+            new_phase = "ENTERING"
 
-        if new_state != self.state:
-            self.state = new_state
-            print(f"[STATE] {self.state}")
+        if new_phase != self.phase:
+            self.phase = new_phase
+            print(f"[PHASE] {self.phase}")
 
     # ---------------- SIMILARITY ----------------
 
@@ -107,10 +115,8 @@ class LoopDetector:
         norm = 0.0
 
         for token in shared:
-            # inverse frequency weighting (automatic noise removal)
             freq = self.global_freq[token] / max(1, self.total_tokens)
             weight = 1.0 / (1.0 + 10 * freq)
-
             score += weight
             norm += weight
 
@@ -160,8 +166,9 @@ class LoopDetector:
 
         # loop start
         if self.anchor_hits >= ANCHOR_CONFIRM and best_match:
-            if self.anchor_text != " ".join(best_match):
-                self.anchor_text = " ".join(best_match)
+            new_anchor = " ".join(best_match)
+            if self.anchor_text != new_anchor:
+                self.anchor_text = new_anchor
                 print(f"\n[LOOP START] {' '.join(tokens[:8])}")
 
         # loop end
