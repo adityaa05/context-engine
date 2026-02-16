@@ -1,9 +1,14 @@
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
-from typing import Deque, Optional, Tuple
-
+from typing import Deque, Optional, Tuple, Set
 import re
+import json
+import os
+from pathlib import Path
+
+
+# ---------------- NORMALIZATION ----------------
 
 NOISE_PATTERNS = [
     r" — \d+×\d+",
@@ -24,7 +29,7 @@ def normalize(app: str, title: str) -> str:
     return text
 
 
-# -------- EVENT --------
+# ---------------- EVENT ----------------
 
 
 @dataclass
@@ -35,34 +40,69 @@ class Event:
     idle: float
 
 
-# -------- PARAMETERS --------
-
-WINDOW = 60  # working memory seconds
-SIM_THRESHOLD = 0.72  # semantic similarity for recurrence
-ANCHOR_CONFIRM = 4  # hits to form attractor
+# ---------------- SEGMENT ----------------
 
 
-# -------- SIMILARITY --------
+@dataclass
+class ThoughtSegment:
+    start: float
+    end: float
+    anchor: str
+    apps: Set[str]
+
+
+# ---------------- STORAGE ----------------
+
+MEMORY_DIR = Path.home() / ".context"
+MEMORY_FILE = MEMORY_DIR / "memory.jsonl"
+
+
+def persist_segment(segment: ThoughtSegment):
+    MEMORY_DIR.mkdir(exist_ok=True)
+
+    with open(MEMORY_FILE, "a") as f:
+        json.dump(
+            {
+                "start": segment.start,
+                "end": segment.end,
+                "anchor": segment.anchor,
+                "apps": list(segment.apps),
+            },
+            f,
+        )
+        f.write("\n")
+
+
+# ---------------- PARAMETERS ----------------
+
+WINDOW = 60
+SIM_THRESHOLD = 0.72
+ANCHOR_CONFIRM = 4
 
 
 def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-# -------- LOOP DETECTOR --------
+# ---------------- LOOP DETECTOR ----------------
 
 
 class LoopDetector:
 
     def __init__(self) -> None:
-        # working memory of recent thoughts
+
+        # working memory
         self.memory: Deque[Tuple[float, str]] = deque()
 
-        # active attractor
+        # attractor
         self.anchor_text: Optional[str] = None
-        self.anchor_hits: int = 0
+        self.anchor_hits: float = 0
 
-        # cognition state tracking
+        # active segment
+        self.segment_start: Optional[float] = None
+        self.segment_apps: Set[str] = set()
+
+        # cognition tracking
         self.prev_idle: Optional[float] = None
         self.idle_resets: Deque[bool] = deque(maxlen=8)
         self.state: Optional[str] = None
@@ -110,14 +150,15 @@ class LoopDetector:
     def detect_loop(self, e: Event) -> None:
 
         text = normalize(e.app, e.title)
-
         if not text:
             return
 
-        # add memory
-        self.memory.append((e.ts, text))
+        # update segment apps
+        if self.anchor_text:
+            self.segment_apps.add(e.app)
 
-        # remove expired memory
+        # update memory
+        self.memory.append((e.ts, text))
         while self.memory and (e.ts - self.memory[0][0]) > WINDOW:
             self.memory.popleft()
 
@@ -134,22 +175,48 @@ class LoopDetector:
                 best_score = s
                 best_text = past
 
-        # recurrence detected
+        # recurrence
         if best_score > SIM_THRESHOLD:
             self.anchor_hits += 1
         elif len(self.memory) > 5:
             self.anchor_hits *= 0.85
 
-        # form attractor
+        # ---------- LOOP START ----------
         if (
             self.anchor_hits >= ANCHOR_CONFIRM
             and best_text
             and self.anchor_text != best_text
         ):
             self.anchor_text = best_text
-            print(f"\n[LOOP START] {text}")
+            self.segment_start = e.ts
+            self.segment_apps = {e.app}
 
-        # collapse attractor
-        if self.anchor_text and self.anchor_hits == 0:
-            print("[LOOP END]")
+            print(f"\n[LOOP START] {best_text}")
+
+        # ---------- LOOP END ----------
+        if self.anchor_text and self.anchor_hits < 0.5:
+            self.close_segment(e.ts)
+
+    # ---------------- SEGMENT CLOSE ----------------
+
+    def close_segment(self, end_ts: float):
+
+        if not self.segment_start:
             self.anchor_text = None
+            return
+
+        segment = ThoughtSegment(
+            start=self.segment_start,
+            end=end_ts,
+            anchor=self.anchor_text,
+            apps=self.segment_apps,
+        )
+
+        persist_segment(segment)
+
+        print(f"[LOOP END] {self.anchor_text}")
+
+        self.anchor_text = None
+        self.segment_start = None
+        self.segment_apps = set()
+        self.anchor_hits = 0
