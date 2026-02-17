@@ -20,8 +20,20 @@ class Event:
 # ---------------- PARAMETERS ----------------
 
 WINDOW = 60
-ANCHOR_CONFIRM = 4
 STATE_MEMORY = 12
+
+ATTENTION_MAX = 100
+ATTENTION_DECAY_PASSIVE = 2
+ATTENTION_DECAY_DETACHED = 8
+ATTENTION_GAIN_ACTIVE = 6
+ATTENTION_GAIN_RELATED = 3
+LOOP_END_THRESHOLD = 0
+
+# Basin physics
+CLUSTER_WINDOW = 90
+ESCAPE_VELOCITY = 0.55
+MIN_REVISITS = 4
+
 
 # ---------------- TOKENIZATION ----------------
 
@@ -32,6 +44,43 @@ def tokenize(text: str) -> List[str]:
     return TOKEN_RE.findall(text.lower())
 
 
+def state_key(app: str, title: str) -> str:
+    text = f"{app} {title}".lower()
+    tokens = tokenize(text)
+    return " ".join(tokens[:6])  # compressed identity
+
+
+# ---------------- BASIN MODEL ----------------
+
+
+class Basin:
+    def __init__(self):
+        self.events: Deque[Tuple[float, str]] = deque()
+        self.counts: Counter[str] = Counter()
+        self.active = False
+
+    def update(self, ts: float, key: str):
+        self.events.append((ts, key))
+        self.counts[key] += 1
+
+        while self.events and ts - self.events[0][0] > CLUSTER_WINDOW:
+            _, old_key = self.events.popleft()
+            self.counts[old_key] -= 1
+            if self.counts[old_key] <= 0:
+                del self.counts[old_key]
+
+    def cluster_size(self):
+        return len(self.counts)
+
+    def revisits(self):
+        return sum(v - 1 for v in self.counts.values() if v > 1)
+
+    def novelty_ratio(self):
+        if not self.events:
+            return 1.0
+        return self.cluster_size() / len(self.events)
+
+
 # ---------------- LOOP DETECTOR ----------------
 
 
@@ -39,23 +88,16 @@ class LoopDetector:
 
     def __init__(self) -> None:
 
-        # recent events memory
-        self.memory: Deque[Tuple[float, List[str]]] = deque()
-
-        # adaptive vocabulary statistics
-        self.global_freq: Counter[str] = Counter()
-        self.total_tokens: int = 0
-
-        # attractor
-        self.anchor_hits = 0
-        self.anchor_text: Optional[str] = None
-
-        # cognitive phase tracking
         self.prev_idle: Optional[float] = None
         self.micro_buffer: Deque[str] = deque(maxlen=STATE_MEMORY)
         self.phase: Optional[str] = None
 
-        # ---------------- NEW: REENTRY SYSTEM ----------------
+        self.attention_score = 0
+
+        # basin model replaces anchor
+        self.basin = Basin()
+
+        # reentry system
         self.suspended = False
         self.last_anchor_before_sleep: Optional[str] = None
         self.reentry = ReentryClassifier()
@@ -64,48 +106,35 @@ class LoopDetector:
 
     def process(self, e: Event) -> None:
 
-        # ---------- SUSPEND DETECTION ----------
-
-        # entering suspension
+        # ---------- SUSPEND ----------
         if not self.suspended and e.idle > 25:
             self.suspended = True
-            self.last_anchor_before_sleep = self.anchor_text
             print("\n[SUSPEND]")
 
-        # waking up
         if self.suspended and e.idle < 0.5:
             self.suspended = False
-            self.reentry.start(e.ts, self.last_anchor_before_sleep)
-
-        # ---------- REENTRY GATE ----------
+            self.reentry.start(e.ts, None)
 
         semantic_now = f"{e.app} {e.title}".lower()
-
-        similar = (
-            self.last_anchor_before_sleep is not None
-            and self.last_anchor_before_sleep in semantic_now
-        )
 
         reset = False
         if self.prev_idle is not None:
             reset = (self.prev_idle - e.idle) > 1.5 and e.idle < 0.3
 
-        verdict = self.reentry.observe(e.ts, semantic_now, similar, reset)
+        verdict = self.reentry.observe(e.ts, semantic_now, False, reset)
 
         if verdict:
-            # cognition stabilized
-            self.anchor_hits = 0
+            self.attention_score = 40
 
-        # while brain reconstructing → ignore loops
         if self.reentry.active:
             self.prev_idle = e.idle
             return
 
-        # ---------- NORMAL PIPELINE ----------
+        # ---------- NORMAL ----------
         self.update_state(e)
         self.detect_loop(e)
 
-    # ---------------- STATE MODEL (TEMPORAL) ----------------
+    # ---------------- STATE ----------------
 
     def update_state(self, e: Event) -> None:
 
@@ -147,78 +176,42 @@ class LoopDetector:
             self.phase = new_phase
             print(f"[PHASE] {self.phase}")
 
-    # ---------------- SIMILARITY ----------------
+        # -------- ATTENTION PHYSICS --------
 
-    def weighted_similarity(self, a: List[str], b: List[str]) -> float:
+        if self.basin.active:
+            if new_phase == "ACTIVE":
+                self.attention_score += ATTENTION_GAIN_ACTIVE
+            elif new_phase == "EXPLORING":
+                self.attention_score += ATTENTION_GAIN_RELATED
+            elif new_phase == "PASSIVE":
+                self.attention_score -= ATTENTION_DECAY_PASSIVE
+            elif new_phase == "DETACHED":
+                self.attention_score -= ATTENTION_DECAY_DETACHED
 
-        if not a or not b:
-            return 0.0
+            self.attention_score = max(0, min(ATTENTION_MAX, self.attention_score))
 
-        shared = set(a) & set(b)
-        if not shared:
-            return 0.0
+            if self.attention_score <= LOOP_END_THRESHOLD:
+                print("[LOOP END]")
+                self.basin.active = False
 
-        score = 0.0
-        norm = 0.0
-
-        for token in shared:
-            freq = self.global_freq[token] / max(1, self.total_tokens)
-            weight = 1.0 / (1.0 + 10 * freq)
-            score += weight
-            norm += weight
-
-        return score / max(norm, 1e-6)
-
-    # ---------------- LOOP MODEL ----------------
+    # ---------------- LOOP MODEL (BASIN) ----------------
 
     def detect_loop(self, e: Event) -> None:
 
-        text = f"{e.app} {e.title}"
-        tokens = tokenize(text)
+        key = state_key(e.app, e.title)
+        self.basin.update(e.ts, key)
 
-        if not tokens:
-            return
+        size = self.basin.cluster_size()
+        revisits = self.basin.revisits()
+        novelty = self.basin.novelty_ratio()
 
-        # update vocabulary stats
-        for t in tokens:
-            self.global_freq[t] += 1
-            self.total_tokens += 1
+        stable = revisits >= MIN_REVISITS and novelty < ESCAPE_VELOCITY
 
-        # add memory
-        self.memory.append((e.ts, tokens))
+        if stable and not self.basin.active:
+            self.basin.active = True
+            self.attention_score = 60
+            print(f"\n[LOOP START] {key}")
 
-        # expire memory
-        while self.memory and (e.ts - self.memory[0][0]) > WINDOW:
-            self.memory.popleft()
-
-        # find recurrence
-        best_score = 0.0
-        best_match: Optional[List[str]] = None
-
-        for _, past in self.memory:
-            if past == tokens:
-                continue
-
-            s = self.weighted_similarity(tokens, past)
-
-            if s > best_score:
-                best_score = s
-                best_match = past
-
-        # dynamic recurrence
-        if best_score > 0.35:
-            self.anchor_hits += 1
-        elif len(self.memory) > 5:
-            self.anchor_hits *= 0.8
-
-        # loop start
-        if self.anchor_hits >= ANCHOR_CONFIRM and best_match:
-            new_anchor = " ".join(best_match)
-            if self.anchor_text != new_anchor:
-                self.anchor_text = new_anchor
-                print(f"\n[LOOP START] {' '.join(tokens[:8])}")
-
-        # loop end
-        if self.anchor_text and self.anchor_hits < 1:
+        if self.basin.active and novelty > ESCAPE_VELOCITY:
+            self.basin.active = False
             print("[LOOP END]")
-            self.anchor_text = None
