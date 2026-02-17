@@ -4,6 +4,8 @@ import re
 from typing import Optional
 
 from .loop_detector import LoopDetector, Event
+from .event_bus import EventBus
+from .events import CognitiveEvent
 
 
 # -------- LOG SOURCE --------
@@ -28,12 +30,11 @@ def extract_json(line: str) -> Optional[dict]:
     macOS unified logs prepend metadata before the JSON.
     We safely extract the first JSON object in the line.
     """
-
     match = JSON_RE.search(line)
     if not match:
         return None
 
-    raw = match.group(0)  # <-- not group(1)
+    raw = match.group(0)
 
     try:
         return json.loads(raw)
@@ -41,11 +42,28 @@ def extract_json(line: str) -> Optional[dict]:
         return None
 
 
+# -------- DEBUG LISTENER --------
+
+
+def debug_listener(event: CognitiveEvent):
+    """
+    Temporary: prints cognition stream.
+    Later this becomes DB writer / UI stream.
+    """
+    print(event)
+
+
 # -------- MAIN RUNTIME --------
 
 
 def main() -> None:
-    detector = LoopDetector()
+
+    # 1️⃣ Create event bus
+    bus = EventBus()
+    bus.subscribe(debug_listener)
+
+    # 2️⃣ Pass bus into detector
+    detector = LoopDetector(bus)
 
     proc = subprocess.Popen(
         LOG_CMD,
@@ -68,8 +86,8 @@ def main() -> None:
             try:
                 event = Event(
                     ts=float(data["ts"]),
-                    app=str(data["app"]),
-                    title=str(data["title"]),
+                    app=str(data.get("app", "")),
+                    title=str(data.get("title", "")),
                     idle=float(data["idle"]),
                 )
 
