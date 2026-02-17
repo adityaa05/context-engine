@@ -1,23 +1,21 @@
-from dataclasses import dataclass
 from enum import Enum
+from dataclasses import dataclass
 from typing import Optional
 
 
-# ---------------- EVENT TYPES ----------------
-
 class EventType(str, Enum):
+
+    # Loop lifecycle
     LOOP_START = "LOOP_START"
     LOOP_END = "LOOP_END"
 
+    # Cognitive state
     PHASE = "PHASE"
 
+    # Attention breaks
     SUSPEND = "SUSPEND"
+    REENTRY = "REENTRY"
 
-    REENTRY_START = "REENTRY_START"
-    REENTRY_RESULT = "REENTRY_RESULT"
-
-
-# ---------------- EVENT STRUCT ----------------
 
 @dataclass
 class CognitiveEvent:
