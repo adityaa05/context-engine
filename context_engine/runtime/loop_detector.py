@@ -4,7 +4,6 @@ from typing import Deque, Optional, Tuple, List
 import re
 
 from .reentry_classifier import ReentryClassifier
-from .event_bus import EventBus
 from .events import CognitiveEvent, EventType
 
 
@@ -47,7 +46,7 @@ def tokenize(text: str) -> List[str]:
 
 class LoopDetector:
 
-    def __init__(self, bus: EventBus) -> None:
+    def __init__(self, bus) -> None:
 
         self.bus = bus
 
@@ -62,13 +61,25 @@ class LoopDetector:
         self.micro_buffer: Deque[str] = deque(maxlen=STATE_MEMORY)
         self.phase: Optional[str] = None
 
-        # attention gravity
         self.attention_score = 0
 
-        # reentry system
+        # reentry
         self.suspended = False
         self.last_anchor_before_sleep: Optional[str] = None
         self.reentry = ReentryClassifier()
+
+    # ---------------- EVENT EMITTER ----------------
+
+    def emit(self, ts, type_, anchor=None, phase=None, verdict=None):
+        self.bus.emit(
+            CognitiveEvent(
+                ts=ts,
+                type=type_,
+                anchor=anchor,
+                phase=phase,
+                verdict=verdict,
+            )
+        )
 
     # ---------------- PROCESS ----------------
 
@@ -78,20 +89,12 @@ class LoopDetector:
         if not self.suspended and e.idle > 25:
             self.suspended = True
             self.last_anchor_before_sleep = self.anchor_text
-
-            self.bus.emit(CognitiveEvent(ts=e.ts, type=EventType.SUSPEND))
+            self.emit(e.ts, EventType.SUSPEND)
 
         if self.suspended and e.idle < 0.5:
             self.suspended = False
             self.reentry.start(e.ts, self.last_anchor_before_sleep)
-
-            self.bus.emit(
-                CognitiveEvent(
-                    ts=e.ts,
-                    type=EventType.REENTRY_START,
-                    anchor=self.last_anchor_before_sleep,
-                )
-            )
+            self.emit(e.ts, EventType.REENTRY_START)
 
         semantic_now = f"{e.app} {e.title}".lower()
 
@@ -107,11 +110,8 @@ class LoopDetector:
         verdict = self.reentry.observe(e.ts, semantic_now, similar, reset)
 
         if verdict:
+            self.emit(e.ts, EventType.REENTRY_RESULT, verdict=verdict)
             self.attention_score = 40
-
-            self.bus.emit(
-                CognitiveEvent(ts=e.ts, type=EventType.REENTRY_RESULT, verdict=verdict)
-            )
 
         if self.reentry.active:
             self.prev_idle = e.idle
@@ -161,10 +161,7 @@ class LoopDetector:
 
         if new_phase != self.phase:
             self.phase = new_phase
-
-            self.bus.emit(
-                CognitiveEvent(ts=e.ts, type=EventType.PHASE, phase=self.phase)
-            )
+            self.emit(e.ts, EventType.PHASE, phase=new_phase)
 
         # -------- ATTENTION PHYSICS --------
 
@@ -181,11 +178,7 @@ class LoopDetector:
             self.attention_score = max(0, min(ATTENTION_MAX, self.attention_score))
 
             if self.attention_score <= LOOP_END_THRESHOLD:
-                self.bus.emit(
-                    CognitiveEvent(
-                        ts=e.ts, type=EventType.LOOP_END, anchor=self.anchor_text
-                    )
-                )
+                self.emit(e.ts, EventType.LOOP_END, anchor=self.anchor_text)
                 self.anchor_text = None
 
     # ---------------- SIMILARITY ----------------
@@ -252,9 +245,4 @@ class LoopDetector:
             if self.anchor_text != new_anchor:
                 self.anchor_text = new_anchor
                 self.attention_score = 60
-
-                self.bus.emit(
-                    CognitiveEvent(
-                        ts=e.ts, type=EventType.LOOP_START, anchor=new_anchor
-                    )
-                )
+                self.emit(e.ts, EventType.LOOP_START, anchor=new_anchor)
