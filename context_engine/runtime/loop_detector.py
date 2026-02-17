@@ -4,6 +4,8 @@ from typing import Deque, Optional, Tuple, List
 import re
 
 from .reentry_classifier import ReentryClassifier
+from .event_bus import EventBus
+from .events import CognitiveEvent, EventType
 
 
 # ---------------- EVENT ----------------
@@ -40,18 +42,14 @@ def tokenize(text: str) -> List[str]:
     return TOKEN_RE.findall(text.lower())
 
 
-def state_key(app: str, title: str) -> str:
-    """Normalize an interaction state into a cognitive key."""
-    tokens = tokenize(f"{app} {title}")
-    return " ".join(tokens[:6])  # small stable signature
-
-
 # ---------------- LOOP DETECTOR ----------------
 
 
 class LoopDetector:
 
-    def __init__(self) -> None:
+    def __init__(self, bus: EventBus) -> None:
+
+        self.bus = bus
 
         self.memory: Deque[Tuple[float, List[str]]] = deque()
         self.global_freq: Counter[str] = Counter()
@@ -64,34 +62,13 @@ class LoopDetector:
         self.micro_buffer: Deque[str] = deque(maxlen=STATE_MEMORY)
         self.phase: Optional[str] = None
 
-        # cognitive gravity
+        # attention gravity
         self.attention_score = 0
-
-        # basin (interaction attractor)
-        self.basin: Counter[str] = Counter()
 
         # reentry system
         self.suspended = False
         self.last_anchor_before_sleep: Optional[str] = None
         self.reentry = ReentryClassifier()
-
-    # ---------------- BASIN SIMILARITY ----------------
-
-    def basin_similarity(self, key: str) -> bool:
-        """Detect return to same mental basin (not string match, behavior match)."""
-
-        if key in self.basin:
-            return True
-
-        # soft overlap similarity
-        key_tokens = set(key.split())
-
-        for existing in self.basin:
-            overlap = len(key_tokens & set(existing.split()))
-            if overlap >= 2:
-                return True
-
-        return False
 
     # ---------------- PROCESS ----------------
 
@@ -101,27 +78,41 @@ class LoopDetector:
         if not self.suspended and e.idle > 25:
             self.suspended = True
             self.last_anchor_before_sleep = self.anchor_text
-            print("\n[SUSPEND]")
+
+            self.bus.emit(CognitiveEvent(ts=e.ts, type=EventType.SUSPEND))
 
         if self.suspended and e.idle < 0.5:
             self.suspended = False
             self.reentry.start(e.ts, self.last_anchor_before_sleep)
 
-        # ---------- REENTRY CONTINUITY ----------
-        key = state_key(e.app, e.title)
+            self.bus.emit(
+                CognitiveEvent(
+                    ts=e.ts,
+                    type=EventType.REENTRY_START,
+                    anchor=self.last_anchor_before_sleep,
+                )
+            )
 
-        similar = self.basin_similarity(key)
+        semantic_now = f"{e.app} {e.title}".lower()
+
+        similar = (
+            self.last_anchor_before_sleep
+            and self.last_anchor_before_sleep in semantic_now
+        )
 
         reset = False
         if self.prev_idle is not None:
             reset = (self.prev_idle - e.idle) > 1.5 and e.idle < 0.3
 
-        verdict = self.reentry.observe(e.ts, key, similar, reset)
+        verdict = self.reentry.observe(e.ts, semantic_now, similar, reset)
 
         if verdict:
-            self.attention_score = 40  # restore gravity after reentry
+            self.attention_score = 40
 
-        # ignore loop detection during reconstruction
+            self.bus.emit(
+                CognitiveEvent(ts=e.ts, type=EventType.REENTRY_RESULT, verdict=verdict)
+            )
+
         if self.reentry.active:
             self.prev_idle = e.idle
             return
@@ -170,7 +161,10 @@ class LoopDetector:
 
         if new_phase != self.phase:
             self.phase = new_phase
-            print(f"[PHASE] {self.phase}")
+
+            self.bus.emit(
+                CognitiveEvent(ts=e.ts, type=EventType.PHASE, phase=self.phase)
+            )
 
         # -------- ATTENTION PHYSICS --------
 
@@ -187,25 +181,80 @@ class LoopDetector:
             self.attention_score = max(0, min(ATTENTION_MAX, self.attention_score))
 
             if self.attention_score <= LOOP_END_THRESHOLD:
-                print("[LOOP END]")
+                self.bus.emit(
+                    CognitiveEvent(
+                        ts=e.ts, type=EventType.LOOP_END, anchor=self.anchor_text
+                    )
+                )
                 self.anchor_text = None
-                self.basin.clear()
+
+    # ---------------- SIMILARITY ----------------
+
+    def weighted_similarity(self, a: List[str], b: List[str]) -> float:
+
+        if not a or not b:
+            return 0.0
+
+        shared = set(a) & set(b)
+        if not shared:
+            return 0.0
+
+        score = 0.0
+        norm = 0.0
+
+        for token in shared:
+            freq = self.global_freq[token] / max(1, self.total_tokens)
+            weight = 1.0 / (1.0 + 10 * freq)
+            score += weight
+            norm += weight
+
+        return score / max(norm, 1e-6)
 
     # ---------------- LOOP MODEL ----------------
 
     def detect_loop(self, e: Event) -> None:
 
-        key = state_key(e.app, e.title)
+        text = f"{e.app} {e.title}"
+        tokens = tokenize(text)
 
-        if not key.strip():
+        if not tokens:
             return
 
-        # grow basin
-        self.basin[key] += 1
+        for t in tokens:
+            self.global_freq[t] += 1
+            self.total_tokens += 1
 
-        # anchor formation
-        if self.basin[key] >= ANCHOR_CONFIRM:
-            if self.anchor_text != key:
-                self.anchor_text = key
+        self.memory.append((e.ts, tokens))
+
+        while self.memory and (e.ts - self.memory[0][0]) > WINDOW:
+            self.memory.popleft()
+
+        best_score = 0.0
+        best_match: Optional[List[str]] = None
+
+        for _, past in self.memory:
+            if past == tokens:
+                continue
+
+            s = self.weighted_similarity(tokens, past)
+
+            if s > best_score:
+                best_score = s
+                best_match = past
+
+        if best_score > 0.35:
+            self.anchor_hits += 1
+        else:
+            self.anchor_hits *= 0.9
+
+        if self.anchor_hits >= ANCHOR_CONFIRM and best_match:
+            new_anchor = " ".join(best_match)
+            if self.anchor_text != new_anchor:
+                self.anchor_text = new_anchor
                 self.attention_score = 60
-                print(f"\n[LOOP START] {key}")
+
+                self.bus.emit(
+                    CognitiveEvent(
+                        ts=e.ts, type=EventType.LOOP_START, anchor=new_anchor
+                    )
+                )
