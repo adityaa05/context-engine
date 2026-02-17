@@ -1,13 +1,7 @@
 from typing import Optional
 
-# observation window (hard cap)
-MAX_OBSERVE = 15.0
-
-# decision thresholds
-FAST_SWITCH_TIME = 3.0
-ABANDON_IDLE = 12.0
-FAST_RESET = 2.0
-RECONSTRUCT_MIN = 3.0
+EARLY_DECISION_THRESHOLD = 4
+MAX_WINDOW = 40
 
 
 class ReentryClassifier:
@@ -15,15 +9,20 @@ class ReentryClassifier:
     def __init__(self):
         self.active = False
         self.start_ts = 0.0
-        self.prev_anchor: Optional[str] = None
+        self.prev_anchor = None
 
-        # observation metrics
-        self.first_reset_ts: Optional[float] = None
-        self.first_switch_ts: Optional[float] = None
+        self.first_similar_ts: Optional[float] = None
+        self.last_ts: float = 0.0
 
-        self.reset_count = 0
-        self.last_semantic: Optional[str] = None
-        self.max_idle = 0.0
+        self.visited = set()
+        self.resets = 0
+        self.events = 0
+
+        # confidence scores
+        self.score_continued = 0
+        self.score_resumed = 0
+        self.score_reconstructed = 0
+        self.score_replaced = 0
 
     # ---------------- START ----------------
 
@@ -31,83 +30,102 @@ class ReentryClassifier:
         self.active = True
         self.start_ts = ts
         self.prev_anchor = previous_anchor
+        self.first_similar_ts = None
+        self.last_ts = ts
 
-        self.first_reset_ts = None
-        self.first_switch_ts = None
-        self.reset_count = 0
-        self.last_semantic = None
-        self.max_idle = 0.0
+        self.visited.clear()
+        self.resets = 0
+        self.events = 0
+
+        self.score_continued = 0
+        self.score_resumed = 0
+        self.score_reconstructed = 0
+        self.score_replaced = 0
 
         print("\n[REENTRY START]")
 
     # ---------------- OBSERVE ----------------
 
-    def observe(
-        self, ts: float, semantic: str, similar: bool, reset: bool, idle: float
-    ):
+    def observe(self, ts: float, semantic: str, similar: bool, reset: bool):
+
         if not self.active:
             return None
 
-        elapsed = ts - self.start_ts
-        self.max_idle = max(self.max_idle, idle)
+        self.events += 1
+        self.visited.add(semantic)
 
-        # detect app/task switch
-        if self.last_semantic and semantic != self.last_semantic:
-            if self.first_switch_ts is None:
-                self.first_switch_ts = elapsed
-
-        self.last_semantic = semantic
-
-        # detect action
         if reset:
-            self.reset_count += 1
-            if self.first_reset_ts is None:
-                self.first_reset_ts = elapsed
+            self.resets += 1
 
-        # ---------- EARLY EXIT RULES ----------
+        latency = ts - self.start_ts
 
-        # immediate replacement
-        if self.first_switch_ts is not None and self.first_switch_ts < FAST_SWITCH_TIME:
-            return self.finish("REPLACED")
+        if similar and self.first_similar_ts is None:
+            self.first_similar_ts = ts
 
-        # abandonment
-        if self.max_idle > ABANDON_IDLE:
-            return self.finish("ABANDONED")
+        # -------- Evidence accumulation --------
 
-        # decisive continuation
-        if (
-            self.first_reset_ts is not None
-            and self.first_reset_ts < FAST_RESET
-            and self.reset_count >= 3
-        ):
-            return self.finish("CONTINUED")
+        if similar and latency < 1.5:
+            self.score_continued += 3
 
-        # reconstruction pattern
-        if (
-            self.first_reset_ts is not None
-            and RECONSTRUCT_MIN <= self.first_reset_ts <= 10
-            and self.reset_count >= 2
-        ):
-            return self.finish("RECONSTRUCTED")
+        elif similar and latency < 8:
+            self.score_reconstructed += 2
 
-        # hard timeout
-        if elapsed >= MAX_OBSERVE:
-            return self.finish(self.default_verdict())
+        elif similar:
+            self.score_resumed += 2
+
+        if len(self.visited) >= 4:
+            self.score_resumed += 2
+
+        if self.resets >= 3:
+            self.score_resumed += 2
+
+        if not similar and latency > 6:
+            self.score_replaced += 3
+
+        # -------- Early decision --------
+        verdict = self.try_finish(ts)
+        if verdict:
+            return verdict
+
+        # -------- Fallback timeout --------
+        if ts - self.start_ts > MAX_WINDOW:
+            return self.force_finish(ts)
 
         return None
 
-    # ---------------- DEFAULT DECISION ----------------
+    # ---------------- DECISION ----------------
 
-    def default_verdict(self):
-        if self.reset_count == 0:
-            return "ABANDONED"
-        if self.first_reset_ts and self.first_reset_ts < 4:
-            return "CONTINUED"
-        return "REPLACED"
+    def try_finish(self, ts):
 
-    # ---------------- FINISH ----------------
+        scores = {
+            "CONTINUED": self.score_continued,
+            "RECONSTRUCTED": self.score_reconstructed,
+            "RESUMED": self.score_resumed,
+            "REPLACED": self.score_replaced,
+        }
 
-    def finish(self, verdict: str):
+        best = max(scores, key=scores.get)
+
+        if scores[best] >= EARLY_DECISION_THRESHOLD:
+            return self.finish(best)
+
+        return None
+
+    def force_finish(self, ts):
+
+        scores = {
+            "CONTINUED": self.score_continued,
+            "RECONSTRUCTED": self.score_reconstructed,
+            "RESUMED": self.score_resumed,
+            "REPLACED": self.score_replaced,
+        }
+
+        best = max(scores, key=scores.get)
+        return self.finish(best)
+
+    # ---------------- END ----------------
+
+    def finish(self, verdict):
         self.active = False
         print(f"[REENTRY RESULT] {verdict}\n")
         return verdict
