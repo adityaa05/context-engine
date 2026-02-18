@@ -4,6 +4,7 @@ from typing import Deque, Optional, Tuple, List
 import re
 
 from .reentry_classifier import ReentryClassifier
+from .event_bus import EventBus
 
 
 # ---------------- EVENT ----------------
@@ -19,17 +20,18 @@ class Event:
 
 # ---------------- PARAMETERS ----------------
 
-WINDOW = 90
-ANCHOR_CONFIRM = 5
+WINDOW = 60
+ANCHOR_CONFIRM = 4
 STATE_MEMORY = 12
 
-TOPIC_SIM_THRESHOLD = 0.22
-TOPIC_SHIFT_THRESHOLD = 0.12
-TOPIC_DECAY = 0.97
-
 ATTENTION_MAX = 100
-ATTENTION_DECAY = 3
-ATTENTION_GAIN = 6
+ATTENTION_DECAY_PASSIVE = 2
+ATTENTION_DECAY_DETACHED = 8
+ATTENTION_GAIN_ACTIVE = 6
+ATTENTION_GAIN_RELATED = 3
+LOOP_END_THRESHOLD = 0
+
+ANCHOR_STARVATION_TIME = 18
 
 
 # ---------------- TOKENIZATION ----------------
@@ -46,12 +48,13 @@ def tokenize(text: str) -> List[str]:
 
 class LoopDetector:
 
-    def __init__(self, bus):
+    def __init__(self, bus: EventBus):
 
         self.bus = bus
 
         self.memory: Deque[Tuple[float, List[str]]] = deque()
-        self.topic_vector: Counter[str] = Counter()
+        self.global_freq: Counter[str] = Counter()
+        self.total_tokens: int = 0
 
         self.anchor_hits = 0
         self.anchor_text: Optional[str] = None
@@ -62,20 +65,20 @@ class LoopDetector:
 
         self.attention_score = 0
 
+        # reentry
         self.suspended = False
         self.last_anchor_before_sleep: Optional[str] = None
         self.reentry = ReentryClassifier()
+
+        # semantic suspend
+        self.last_anchor_seen_ts: Optional[float] = None
+        self.starving_since: Optional[float] = None
 
     # ---------------- PROCESS ----------------
 
     def process(self, e: Event) -> None:
 
-        # suspend detection
-        if not self.suspended and e.idle > 25:
-            self.suspended = True
-            self.last_anchor_before_sleep = self.anchor_text
-            self.bus.emit_suspend(e.ts)
-
+        # wake from suspend
         if self.suspended and e.idle < 0.5:
             self.suspended = False
             self.reentry.start(e.ts, self.last_anchor_before_sleep)
@@ -94,7 +97,6 @@ class LoopDetector:
         verdict = self.reentry.observe(e.ts, semantic_now, similar, reset)
 
         if verdict:
-            self.attention_score = 40
             self.bus.emit_reentry(e.ts, verdict)
 
         if self.reentry.active:
@@ -102,11 +104,11 @@ class LoopDetector:
             return
 
         self.update_state(e)
-        self.detect_topic_loop(e)
+        self.detect_loop(e)
 
     # ---------------- STATE ----------------
 
-    def update_state(self, e: Event):
+    def update_state(self, e: Event) -> None:
 
         if self.prev_idle is None:
             self.prev_idle = e.idle
@@ -147,35 +149,88 @@ class LoopDetector:
             self.bus.emit_phase(e.ts, new_phase)
 
         if self.anchor_text:
-            if new_phase == "DETACHED":
-                self.attention_score -= ATTENTION_DECAY
-            else:
-                self.attention_score += ATTENTION_GAIN
+
+            if new_phase == "ACTIVE":
+                self.attention_score += ATTENTION_GAIN_ACTIVE
+            elif new_phase == "EXPLORING":
+                self.attention_score += ATTENTION_GAIN_RELATED
+            elif new_phase == "PASSIVE":
+                self.attention_score -= ATTENTION_DECAY_PASSIVE
+            elif new_phase == "DETACHED":
+                self.attention_score -= ATTENTION_DECAY_DETACHED
 
             self.attention_score = max(0, min(ATTENTION_MAX, self.attention_score))
 
-            if self.attention_score <= 0:
-                self.bus.emit_loop_end(e.ts, self.anchor_text)
+            if self.attention_score <= LOOP_END_THRESHOLD:
                 self.anchor_text = None
-                self.topic_vector.clear()
 
-    # ---------------- TOPIC SIMILARITY ----------------
+    # ---------------- SEMANTIC SUSPEND ----------------
 
-    def topic_similarity(self, tokens: List[str]) -> float:
-        if not self.topic_vector:
+    def check_semantic_suspend(self, e: Event, tokens: List[str]):
+
+        if not self.anchor_text:
+            return
+
+        anchor_tokens = set(self.anchor_text.split())
+        overlap = len(anchor_tokens & set(tokens)) / max(len(anchor_tokens), 1)
+
+        similar = overlap > 0.35
+
+        if similar:
+            self.last_anchor_seen_ts = e.ts
+            self.starving_since = None
+            return
+
+        if self.last_anchor_seen_ts is None:
+            self.last_anchor_seen_ts = e.ts
+            return
+
+        if self.starving_since is None:
+            self.starving_since = e.ts
+
+        starvation = e.ts - self.starving_since
+
+        if starvation > ANCHOR_STARVATION_TIME:
+            self.trigger_suspend(e.ts)
+
+    def trigger_suspend(self, ts: float):
+
+        if self.suspended:
+            return
+
+        self.suspended = True
+        self.last_anchor_before_sleep = self.anchor_text
+        self.anchor_text = None
+        self.anchor_hits = 0
+        self.attention_score = 0
+
+        self.bus.emit_suspend(ts)
+
+    # ---------------- SIMILARITY ----------------
+
+    def weighted_similarity(self, a: List[str], b: List[str]) -> float:
+
+        if not a or not b:
             return 0.0
 
-        score = 0
-        for t in tokens:
-            if t in self.topic_vector:
-                score += self.topic_vector[t]
+        shared = set(a) & set(b)
+        if not shared:
+            return 0.0
 
-        norm = sum(self.topic_vector.values()) + 1e-6
-        return score / norm
+        score = 0.0
+        norm = 0.0
+
+        for token in shared:
+            freq = self.global_freq[token] / max(1, self.total_tokens)
+            weight = 1.0 / (1.0 + 10 * freq)
+            score += weight
+            norm += weight
+
+        return score / max(norm, 1e-6)
 
     # ---------------- LOOP MODEL ----------------
 
-    def detect_topic_loop(self, e: Event):
+    def detect_loop(self, e: Event) -> None:
 
         text = f"{e.app} {e.title}"
         tokens = tokenize(text)
@@ -183,23 +238,40 @@ class LoopDetector:
         if not tokens:
             return
 
-        similarity = self.topic_similarity(tokens)
+        self.check_semantic_suspend(e, tokens)
 
-        # reinforce current topic
-        if similarity > TOPIC_SIM_THRESHOLD:
+        for t in tokens:
+            self.global_freq[t] += 1
+            self.total_tokens += 1
+
+        self.memory.append((e.ts, tokens))
+
+        while self.memory and (e.ts - self.memory[0][0]) > WINDOW:
+            self.memory.popleft()
+
+        best_score = 0.0
+        best_match: Optional[List[str]] = None
+
+        for _, past in self.memory:
+            if past == tokens:
+                continue
+
+            s = self.weighted_similarity(tokens, past)
+
+            if s > best_score:
+                best_score = s
+                best_match = past
+
+        if best_score > 0.35:
             self.anchor_hits += 1
-            for t in tokens:
-                self.topic_vector[t] += 1
-
-        # possible shift
         else:
-            self.anchor_hits -= 1
-            if similarity < TOPIC_SHIFT_THRESHOLD:
-                for k in list(self.topic_vector):
-                    self.topic_vector[k] *= TOPIC_DECAY
+            self.anchor_hits *= 0.9
 
-        # start loop
-        if self.anchor_text is None and self.anchor_hits >= ANCHOR_CONFIRM:
-            self.anchor_text = " ".join(tokens[:6])
-            self.attention_score = 60
-            self.bus.emit_loop_start(e.ts, self.anchor_text)
+        if self.anchor_hits >= ANCHOR_CONFIRM and best_match:
+            new_anchor = " ".join(best_match)
+
+            if self.anchor_text != new_anchor:
+                self.anchor_text = new_anchor
+                self.attention_score = 60
+                self.last_anchor_seen_ts = e.ts
+                self.bus.emit_loop_start(e.ts, new_anchor)
