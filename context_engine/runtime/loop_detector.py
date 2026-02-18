@@ -33,6 +33,9 @@ LOOP_END_THRESHOLD = 0
 
 ANCHOR_STARVATION_TIME = 18
 
+# NEW — real human absence detection
+GLOBAL_ABSENCE_TIMEOUT = 45
+
 
 # ---------------- TOKENIZATION ----------------
 
@@ -70,7 +73,10 @@ class LoopDetector:
         self.last_anchor_before_sleep: Optional[str] = None
         self.reentry = ReentryClassifier()
 
-        # semantic suspend
+        # presence tracking (NEW)
+        self.last_event_ts: Optional[float] = None
+
+        # semantic starvation (now ONLY clears anchor)
         self.last_anchor_seen_ts: Optional[float] = None
         self.starving_since: Optional[float] = None
 
@@ -78,7 +84,16 @@ class LoopDetector:
 
     def process(self, e: Event) -> None:
 
-        # wake from suspend
+        # ---------- GLOBAL ABSENCE DETECTION ----------
+        if self.last_event_ts is not None:
+            gap = e.ts - self.last_event_ts
+
+            if gap > GLOBAL_ABSENCE_TIMEOUT:
+                self.trigger_suspend(self.last_event_ts)
+
+        self.last_event_ts = e.ts
+
+        # ---------- WAKE ----------
         if self.suspended and e.idle < 0.5:
             self.suspended = False
             self.reentry.start(e.ts, self.last_anchor_before_sleep)
@@ -148,6 +163,7 @@ class LoopDetector:
             self.phase = new_phase
             self.bus.emit_phase(e.ts, new_phase)
 
+        # attention
         if self.anchor_text:
 
             if new_phase == "ACTIVE":
@@ -164,9 +180,9 @@ class LoopDetector:
             if self.attention_score <= LOOP_END_THRESHOLD:
                 self.anchor_text = None
 
-    # ---------------- SEMANTIC SUSPEND ----------------
+    # ---------------- SEMANTIC STARVATION (NO LONGER SUSPENDS) ----------------
 
-    def check_semantic_suspend(self, e: Event, tokens: List[str]):
+    def check_semantic_starvation(self, e: Event, tokens: List[str]):
 
         if not self.anchor_text:
             return
@@ -191,7 +207,12 @@ class LoopDetector:
         starvation = e.ts - self.starving_since
 
         if starvation > ANCHOR_STARVATION_TIME:
-            self.trigger_suspend(e.ts)
+            # topic changed, not user absence
+            self.anchor_text = None
+            self.anchor_hits = 0
+            self.attention_score = 0
+
+    # ---------------- REAL SUSPEND ----------------
 
     def trigger_suspend(self, ts: float):
 
@@ -238,7 +259,7 @@ class LoopDetector:
         if not tokens:
             return
 
-        self.check_semantic_suspend(e, tokens)
+        self.check_semantic_starvation(e, tokens)
 
         for t in tokens:
             self.global_freq[t] += 1
