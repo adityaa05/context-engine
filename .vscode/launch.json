@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:context-agent}",
+      "name": "Debug context-agent",
+      "target": "context-agent",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug context-agent"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:context-agent}",
+      "name": "Release context-agent",
+      "target": "context-agent",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release context-agent"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:context-agent}",
+      "name": "Debug ContextAgent",
+      "target": "ContextAgent",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug ContextAgent"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:context-agent}",
+      "name": "Release ContextAgent",
+      "target": "ContextAgent",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release ContextAgent"
+    }
+  ]
+}
