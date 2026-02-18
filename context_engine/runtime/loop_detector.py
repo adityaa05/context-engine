@@ -70,7 +70,7 @@ class LoopDetector:
         self.last_anchor_before_sleep: Optional[str] = None
         self.reentry = ReentryClassifier()
 
-        # semantic suspend
+        # semantic suspend tracking
         self.last_anchor_seen_ts: Optional[float] = None
         self.starving_since: Optional[float] = None
 
@@ -164,7 +164,7 @@ class LoopDetector:
             if self.attention_score <= LOOP_END_THRESHOLD:
                 self.anchor_text = None
 
-    # ---------------- SEMANTIC SUSPEND ----------------
+    # ---------------- FIXED SEMANTIC SUSPEND ----------------
 
     def check_semantic_suspend(self, e: Event, tokens: List[str]):
 
@@ -172,25 +172,32 @@ class LoopDetector:
             return
 
         anchor_tokens = set(self.anchor_text.split())
-        overlap = len(anchor_tokens & set(tokens)) / max(len(anchor_tokens), 1)
+        token_set = set(tokens)
 
+        overlap = len(anchor_tokens & token_set) / max(len(anchor_tokens), 1)
         similar = overlap > 0.35
 
-        if similar:
+        same_app = self.anchor_text.startswith(e.app.lower())
+
+        # STILL SAME ENVIRONMENT → NEVER SUSPEND
+        if similar or same_app:
             self.last_anchor_seen_ts = e.ts
             self.starving_since = None
             return
 
+        # REAL STARVATION
         if self.last_anchor_seen_ts is None:
             self.last_anchor_seen_ts = e.ts
             return
 
         if self.starving_since is None:
             self.starving_since = e.ts
+            return
 
         starvation = e.ts - self.starving_since
 
-        if starvation > ANCHOR_STARVATION_TIME:
+        # ONLY DETACH IF USER IS ACTUALLY DETACHED
+        if starvation > ANCHOR_STARVATION_TIME and self.phase == "DETACHED":
             self.trigger_suspend(e.ts)
 
     def trigger_suspend(self, ts: float):
@@ -227,13 +234,6 @@ class LoopDetector:
             norm += weight
 
         return score / max(norm, 1e-6)
-
-    def anchor_similarity(self, a: str, b: str) -> float:
-        ta = set(tokenize(a))
-        tb = set(tokenize(b))
-        if not ta or not tb:
-            return 0.0
-        return len(ta & tb) / len(ta | tb)
 
     # ---------------- LOOP MODEL ----------------
 
@@ -275,26 +275,10 @@ class LoopDetector:
             self.anchor_hits *= 0.9
 
         if self.anchor_hits >= ANCHOR_CONFIRM and best_match:
-
             new_anchor = " ".join(best_match)
 
-            # no active loop → start
-            if self.anchor_text is None:
+            if self.anchor_text != new_anchor:
                 self.anchor_text = new_anchor
                 self.attention_score = 60
                 self.last_anchor_seen_ts = e.ts
                 self.bus.emit_loop_start(e.ts, new_anchor)
-                return
-
-            # same cognitive task → update loop (no event)
-            sim = self.anchor_similarity(self.anchor_text, new_anchor)
-            if sim > 0.45:
-                self.anchor_text = new_anchor
-                self.last_anchor_seen_ts = e.ts
-                return
-
-            # different task → new loop
-            self.anchor_text = new_anchor
-            self.attention_score = 60
-            self.last_anchor_seen_ts = e.ts
-            self.bus.emit_loop_start(e.ts, new_anchor)
