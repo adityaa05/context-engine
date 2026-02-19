@@ -5,8 +5,8 @@ from typing import Optional
 
 from .loop_detector import LoopDetector, Event
 from .event_bus import EventBus
-from .events import CognitiveEvent
-from .intent_listener import IntentListener  # NEW
+from .events import CognitiveEvent, EventType
+from .goal_continuity import GoalContinuity
 
 
 # -------- LOG SOURCE --------
@@ -23,14 +23,10 @@ LOG_CMD = [
 
 # -------- JSON EXTRACTION --------
 
-JSON_RE = re.compile(r"\{.*?\}")
+JSON_RE = re.compile(r"{.*?}")
 
 
 def extract_json(line: str) -> Optional[dict]:
-    """
-    macOS unified logs prepend metadata before the JSON.
-    We safely extract the first JSON object in the line.
-    """
     match = JSON_RE.search(line)
     if not match:
         return None
@@ -43,14 +39,58 @@ def extract_json(line: str) -> Optional[dict]:
         return None
 
 
+# -------- EPISODE CONTROLLER --------
+
+
+class EpisodeController:
+
+    def __init__(self, bus: EventBus):
+        self.bus = bus
+        self.goal = GoalContinuity()
+        self.current_episode: Optional[int] = None
+        self.next_episode_id = 1
+        self.current_anchor: Optional[str] = None
+
+    def on_loop_start(self, event: CognitiveEvent):
+
+        same_goal = self.goal.is_same_goal(
+            app=event.anchor.split()[0] if event.anchor else "",
+            anchor=event.anchor or "",
+        )
+
+        if same_goal:
+            return  # still same thinking → ignore
+
+        # end previous
+        if self.current_episode is not None:
+            self.bus.publish(
+                CognitiveEvent(
+                    ts=event.ts,
+                    type=EventType.EPISODE_END,
+                    anchor=self.current_anchor,
+                    episode_id=self.current_episode,
+                )
+            )
+
+        # start new
+        self.current_episode = self.next_episode_id
+        self.next_episode_id += 1
+        self.current_anchor = event.anchor
+
+        self.bus.publish(
+            CognitiveEvent(
+                ts=event.ts,
+                type=EventType.EPISODE_START,
+                anchor=event.anchor,
+                episode_id=self.current_episode,
+            )
+        )
+
+
 # -------- DEBUG LISTENER --------
 
 
 def debug_listener(event: CognitiveEvent):
-    """
-    Temporary: prints cognition stream.
-    Later this becomes DB writer / UI stream.
-    """
     print(event)
 
 
@@ -59,19 +99,19 @@ def debug_listener(event: CognitiveEvent):
 
 def main() -> None:
 
-    # Event bus
     bus = EventBus()
-
-    # Debug output (UI placeholder)
     bus.subscribe(debug_listener)
 
-    # Intent binding layer (episodes)
-    bus.subscribe(IntentListener(bus))
-
-    # Perception layer
     detector = LoopDetector(bus)
+    controller = EpisodeController(bus)
 
-    # Log process
+    # intercept LOOP_START events
+    def router(event: CognitiveEvent):
+        if event.type == EventType.LOOP_START:
+            controller.on_loop_start(event)
+
+    bus.subscribe(router)
+
     proc = subprocess.Popen(
         LOG_CMD,
         stdout=subprocess.PIPE,
@@ -101,7 +141,6 @@ def main() -> None:
                 detector.process(event)
 
             except (KeyError, ValueError, TypeError):
-                # corrupted / partial log frame
                 continue
 
     except KeyboardInterrupt:
