@@ -2,19 +2,11 @@ from collections import Counter
 from typing import List, Optional
 import math
 
-
-SPECIALIZATION_WEIGHT = 2.2
-OVERLAP_WEIGHT = 1.6
-RETURN_WEIGHT = 1.4
-
+# --- PARAMETERS ---
 NEW_EPISODE_THRESHOLD = 0.42
 GOAL_MEMORY = 40
-
-# ---- temporal cognition ----
-HARD_BREAK_SECONDS = 120
-SOFT_BREAK_SECONDS = 12
-SCAN_WINDOW_SECONDS = 8
-SCAN_TOLERANCE = 3
+RETURN_WINDOW = 90  # seconds allowed to come back to original goal
+PROVISIONAL_TIMEOUT = 25  # browsing window before we commit new episode
 
 
 def tokenset(text: str) -> List[str]:
@@ -22,6 +14,11 @@ def tokenset(text: str) -> List[str]:
 
 
 class GoalContinuity:
+    """
+    Now supports provisional episodes:
+    We DO NOT immediately break goal when anchor changes.
+    We wait to see if user returns (research loop behaviour).
+    """
 
     def __init__(self):
         self.goal_tokens = Counter()
@@ -29,8 +26,9 @@ class GoalContinuity:
         self.last_app: Optional[str] = None
         self.last_ts: Optional[float] = None
 
-        # scanning memory
-        self.recent_switches = 0
+        # provisional tracking
+        self.pending_anchor: Optional[str] = None
+        self.pending_ts: Optional[float] = None
 
     # ---------- public ----------
 
@@ -38,60 +36,56 @@ class GoalContinuity:
 
         tokens = tokenset(anchor)
 
-        # first anchor
+        # first anchor always new
         if not self.goal_tokens:
-            self._absorb(tokens)
-            self.last_anchor = anchor
-            self.last_app = app
-            self.last_ts = ts
+            self._commit(anchor, app, tokens, ts)
             return False
 
-        # ---------- TIME CHECK ----------
-        gap = ts - self.last_ts if self.last_ts else 0
+        # ---------- RETURN CHECK ----------
+        if self.pending_anchor:
+            # returned to original goal -> cancel provisional break
+            if self._semantic_match(anchor, self.last_anchor):
+                self.pending_anchor = None
+                self.pending_ts = None
+                self._commit(anchor, app, tokens, ts)
+                return True
 
-        if gap > HARD_BREAK_SECONDS:
-            self._reset(tokens, app, ts)
-            return False
+            # waited too long -> commit new episode
+            if ts - self.pending_ts > PROVISIONAL_TIMEOUT:
+                self._reset(tokens)
+                self._commit(anchor, app, tokens, ts)
+                return False
 
-        # ---------- SEMANTIC ----------
+            # still exploring
+            return True
+
+        # ---------- SEMANTIC CONTINUITY ----------
+        continuity = self._continuity_score(app, tokens)
+
+        if continuity >= NEW_EPISODE_THRESHOLD:
+            self._commit(anchor, app, tokens, ts)
+            return True
+
+        # ---------- POSSIBLE NEW GOAL ----------
+        self.pending_anchor = anchor
+        self.pending_ts = ts
+        return True
+
+    # ---------- scoring ----------
+
+    def _continuity_score(self, app: str, tokens: List[str]) -> float:
         overlap = self._overlap_score(tokens)
         specialization = self._specialization_score(tokens)
         return_bonus = self._return_bonus(app)
 
-        continuity = (
-            OVERLAP_WEIGHT * overlap
-            + SPECIALIZATION_WEIGHT * specialization
-            + RETURN_WEIGHT * return_bonus
-        )
+        return 1.6 * overlap + 2.2 * specialization + 1.4 * return_bonus
 
-        # ---------- SCANNING TOLERANCE ----------
-        if continuity < NEW_EPISODE_THRESHOLD:
-            if gap < SCAN_WINDOW_SECONDS:
-                self.recent_switches += 1
-                if self.recent_switches <= SCAN_TOLERANCE:
-                    self._absorb(tokens)
-                    self.last_anchor = anchor
-                    self.last_app = app
-                    self.last_ts = ts
-                    return True
-            else:
-                self.recent_switches = 0
-
-        # ---------- DECISION ----------
-        same = continuity >= NEW_EPISODE_THRESHOLD
-
-        if not same and gap < SOFT_BREAK_SECONDS:
-            same = True
-
-        # update memory
-        self._absorb(tokens)
-        self.last_anchor = anchor
-        self.last_app = app
-        self.last_ts = ts
-
-        return same
-
-    # ---------- scoring ----------
+    def _semantic_match(self, a: Optional[str], b: Optional[str]) -> bool:
+        if not a or not b:
+            return False
+        at = set(tokenset(a))
+        bt = set(tokenset(b))
+        return len(at & bt) / max(len(at), 1) > 0.35
 
     def _overlap_score(self, tokens: List[str]) -> float:
         shared = sum(self.goal_tokens[t] for t in tokens if t in self.goal_tokens)
@@ -107,7 +101,16 @@ class GoalContinuity:
             return 0.7
         return 0.0
 
-    # ---------- update ----------
+    # ---------- state ----------
+
+    def _commit(self, anchor: str, app: str, tokens: List[str], ts: float):
+        self.last_anchor = anchor
+        self.last_app = app
+        self.last_ts = ts
+        self._absorb(tokens)
+
+    def _reset(self, tokens: List[str]):
+        self.goal_tokens = Counter(tokens)
 
     def _absorb(self, tokens: List[str]):
         for t in tokens:
@@ -116,11 +119,3 @@ class GoalContinuity:
         if sum(self.goal_tokens.values()) > GOAL_MEMORY:
             for k in list(self.goal_tokens.keys()):
                 self.goal_tokens[k] *= 0.85
-
-    def _reset(self, tokens: List[str], app: str, ts: float):
-        self.goal_tokens.clear()
-        self.recent_switches = 0
-        self._absorb(tokens)
-        self.last_anchor = anchor = " ".join(tokens)
-        self.last_app = app
-        self.last_ts = ts
