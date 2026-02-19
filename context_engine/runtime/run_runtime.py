@@ -9,6 +9,21 @@ from .events import CognitiveEvent, EventType
 from .goal_continuity import GoalContinuity
 
 
+# -------- HELPERS --------
+
+
+def extract_app_from_anchor(anchor: str) -> str:
+    """
+    Anchors are like:
+    'code loop_detector py context engine'
+    'firefox stackoverflow flutter error'
+
+    First token = app
+    """
+    parts = anchor.split()
+    return parts[0] if parts else "unknown"
+
+
 # -------- LOG SOURCE --------
 
 LOG_CMD = [
@@ -61,7 +76,6 @@ class EpisodeController:
         if same_goal:
             return
 
-        # ---- END PREVIOUS EPISODE ----
         if self.current_episode is not None:
             self.bus.emit(
                 CognitiveEvent(
@@ -72,7 +86,6 @@ class EpisodeController:
                 )
             )
 
-        # ---- START NEW EPISODE ----
         self.current_episode = self.next_episode_id
         self.next_episode_id += 1
         self.current_anchor = anchor
@@ -100,15 +113,35 @@ def debug_listener(event: CognitiveEvent):
 def main() -> None:
 
     bus = EventBus()
-    bus.subscribe(debug_listener)
 
     detector = LoopDetector(bus)
     controller = EpisodeController(bus)
 
-    # intercept LOOP_START events
+    # -------- EPISODE ROUTER --------
     def router(event: CognitiveEvent):
+
+        # pass all events to debug output first
+        debug_listener(event)
+
         if event.type == EventType.LOOP_START:
-            controller.on_loop_start(event)
+
+            if event.anchor is None:
+                return
+
+            controller.on_loop_start(
+                ts=event.ts,
+                app=extract_app_from_anchor(event.anchor),
+                anchor=event.anchor,
+            )
+
+        elif event.type == EventType.PHASE:
+            controller.on_phase(event)
+
+        elif event.type == EventType.SUSPEND:
+            controller.on_suspend(event)
+
+        elif event.type == EventType.REENTRY:
+            controller.on_reentry(event)
 
     bus.subscribe(router)
 
