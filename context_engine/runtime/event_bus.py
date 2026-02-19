@@ -3,39 +3,49 @@ from .events import CognitiveEvent, EventType
 
 
 class EventBus:
-    """
-    Central cognitive event stream.
-    LoopDetector emits structured cognition signals here.
-    Runtime / UI / DB subscribe to it.
-    """
 
     def __init__(self):
         self.listeners: List[Callable[[CognitiveEvent], None]] = []
 
-    # ---------------- SUBSCRIBE ----------------
-
     def subscribe(self, fn: Callable[[CognitiveEvent], None]):
         self.listeners.append(fn)
 
-    # ---------------- CORE EMIT ----------------
+    def emit(self, event: CognitiveEvent):
+        for l in self.listeners:
+            l(event)
 
-    def _emit(self, event: CognitiveEvent):
-        for fn in self.listeners:
-            fn(event)
+    # -------- cognitive --------
 
-    # ---------------- SEMANTIC EVENTS ----------------
+    def emit_loop_start(self, ts, anchor):
+        self.emit(CognitiveEvent(ts, EventType.LOOP_START, anchor=anchor))
 
-    def emit_loop_start(self, ts: float, anchor: str):
-        self._emit(CognitiveEvent(ts=ts, type=EventType.LOOP_START, anchor=anchor))
+    def emit_phase(self, ts, phase):
+        self.emit(CognitiveEvent(ts, EventType.PHASE, phase=phase))
 
-    def emit_loop_end(self, ts: float):
-        self._emit(CognitiveEvent(ts=ts, type=EventType.LOOP_END))
+    def emit_suspend(self, ts):
+        self.emit(CognitiveEvent(ts, EventType.SUSPEND))
 
-    def emit_phase(self, ts: float, phase: str):
-        self._emit(CognitiveEvent(ts=ts, type=EventType.PHASE, phase=phase))
+    def emit_reentry(self, ts, verdict):
+        self.emit(CognitiveEvent(ts, EventType.REENTRY, verdict=verdict))
 
-    def emit_suspend(self, ts: float):
-        self._emit(CognitiveEvent(ts=ts, type=EventType.SUSPEND))
+    # -------- episodes --------
 
-    def emit_reentry(self, ts: float, verdict: str):
-        self._emit(CognitiveEvent(ts=ts, type=EventType.REENTRY, verdict=verdict))
+    def emit_episode_start(self, ep):
+        self.emit(
+            CognitiveEvent(
+                ts=ep.start_ts,
+                type=EventType.EPISODE_START,
+                anchor=ep.main_anchor,
+                episode_id=ep.id,
+            )
+        )
+
+    def emit_episode_end(self, ep):
+        self.emit(
+            CognitiveEvent(
+                ts=ep.last_ts,
+                type=EventType.EPISODE_END,
+                anchor=ep.main_anchor,
+                episode_id=ep.id,
+            )
+        )
