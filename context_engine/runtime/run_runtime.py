@@ -120,9 +120,10 @@ def main() -> None:
     # -------- EPISODE ROUTER --------
     def router(event: CognitiveEvent):
 
-        # pass all events to debug output first
+        # Always print cognition stream
         debug_listener(event)
 
+        # Only LOOP_START affects episode boundaries
         if event.type == EventType.LOOP_START:
 
             if event.anchor is None:
@@ -133,15 +134,6 @@ def main() -> None:
                 app=extract_app_from_anchor(event.anchor),
                 anchor=event.anchor,
             )
-
-        elif event.type == EventType.PHASE:
-            controller.on_phase(event)
-
-        elif event.type == EventType.SUSPEND:
-            controller.on_suspend(event)
-
-        elif event.type == EventType.REENTRY:
-            controller.on_reentry(event)
 
     bus.subscribe(router)
 
