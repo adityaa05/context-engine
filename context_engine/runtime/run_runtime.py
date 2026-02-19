@@ -53,17 +53,17 @@ class EpisodeController:
 
     def on_loop_start(self, event: CognitiveEvent):
 
-        same_goal = self.goal.is_same_goal(
-            app=event.anchor.split()[0] if event.anchor else "",
-            anchor=event.anchor or "",
-        )
+        anchor = event.anchor or ""
+        app = anchor.split()[0] if anchor else ""
+
+        same_goal = self.goal.is_same_goal(app=app, anchor=anchor)
 
         if same_goal:
-            return  # still same thinking → ignore
+            return
 
-        # end previous
+        # ---- END PREVIOUS EPISODE ----
         if self.current_episode is not None:
-            self.bus.publish(
+            self.bus.emit(
                 CognitiveEvent(
                     ts=event.ts,
                     type=EventType.EPISODE_END,
@@ -72,16 +72,16 @@ class EpisodeController:
                 )
             )
 
-        # start new
+        # ---- START NEW EPISODE ----
         self.current_episode = self.next_episode_id
         self.next_episode_id += 1
-        self.current_anchor = event.anchor
+        self.current_anchor = anchor
 
-        self.bus.publish(
+        self.bus.emit(
             CognitiveEvent(
                 ts=event.ts,
                 type=EventType.EPISODE_START,
-                anchor=event.anchor,
+                anchor=anchor,
                 episode_id=self.current_episode,
             )
         )
