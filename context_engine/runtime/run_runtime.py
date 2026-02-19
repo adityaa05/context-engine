@@ -6,6 +6,7 @@ from typing import Optional
 from .loop_detector import LoopDetector, Event
 from .event_bus import EventBus
 from .events import CognitiveEvent
+from .intent_listener import IntentListener  # NEW
 
 
 # -------- LOG SOURCE --------
@@ -58,13 +59,19 @@ def debug_listener(event: CognitiveEvent):
 
 def main() -> None:
 
-    # 1️⃣ Create event bus
+    # Event bus
     bus = EventBus()
+
+    # Debug output (UI placeholder)
     bus.subscribe(debug_listener)
 
-    # 2️⃣ Pass bus into detector
+    # Intent binding layer (episodes)
+    bus.subscribe(IntentListener(bus))
+
+    # Perception layer
     detector = LoopDetector(bus)
 
+    # Log process
     proc = subprocess.Popen(
         LOG_CMD,
         stdout=subprocess.PIPE,
